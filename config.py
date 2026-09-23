@@ -81,6 +81,8 @@ UPLOAD_DIR = Path(_env("UPLOAD_DIR", str(DATA_DIR / "uploaded_docs"))).expanduse
 EXPORT_DIR = Path(_env("EXPORT_DIR", str(DATA_DIR / "exports"))).expanduser().resolve()
 #: 运行时临时目录：Gradio 的上传中转文件等都放这里，退出服务时整体清理
 TEMP_DIR = Path(_env("TEMP_DIR", str(DATA_DIR / "tmp"))).expanduser().resolve()
+#: 运行日志目录：关键事件（API 调用、检索、问答）写入这里的 smardock.log，不随退出清理
+LOG_DIR = Path(_env("LOG_DIR", str(DATA_DIR / "logs"))).expanduser().resolve()
 
 #: ModelScope 模型缓存目录：NER 模型下载到这里（不放系统盘的 ~/.cache）
 MODELSCOPE_CACHE_DIR = Path(
@@ -194,7 +196,7 @@ INBROWSER = _env_bool("INBROWSER", True)
 
 def ensure_dirs() -> None:
     """确保所有运行时目录存在。"""
-    for directory in (DATA_DIR, CHROMA_DIR, UPLOAD_DIR, EXPORT_DIR, TEMP_DIR):
+    for directory in (DATA_DIR, CHROMA_DIR, UPLOAD_DIR, EXPORT_DIR, TEMP_DIR, LOG_DIR):
         Path(directory).mkdir(parents=True, exist_ok=True)
 
 

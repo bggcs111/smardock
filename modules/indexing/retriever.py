@@ -14,10 +14,12 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import config
 from modules.indexing.reranker import RerankError
+from modules.logutil import get_logger
 
 
 class Retriever:
@@ -36,18 +38,52 @@ class Retriever:
         question: str,
         doc_ids: Optional[List[str]] = None,
         top_k: Optional[int] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[Dict[str, Any]]:
-        """返回可直接作为上下文的片段列表。"""
+        """返回可直接作为上下文的片段列表。
+
+        :param cancel_check: 可选回调，返回 True 表示调用方要求中止本次检索。
+            检查点放在**每个阶段之前**：用户点「停止」后，后续阶段（重排、整节展开）
+            不再发起请求，已发出的那一次请求无法从外部中断，返回后立即收手。
+            中止时返回空列表——调用方应先看这个回调，别把空结果当成"没检索到"。
+        """
         kbs = [str(kb).strip() for kb in (kb_names or []) if str(kb or "").strip()]
         if not kbs:
             return []
         limit = config.MAX_CONTEXTS if top_k is None else max(1, int(top_k))
+        aborted = cancel_check or (lambda: False)
+        started = time.perf_counter()
+        log = get_logger()
 
+        if aborted():
+            return []
         vector_hits = self._vector_search(kbs, question, doc_ids)
+        if aborted():
+            log.info("检索中止(用户停止) kbs=%s", "+".join(kbs))
+            return []
         keyword_pairs = self._keyword_search(kbs, question, doc_ids)
         merged = self._fuse(vector_hits, keyword_pairs)
+        if aborted():
+            log.info("检索中止(用户停止) kbs=%s", "+".join(kbs))
+            return []
         merged = self._rerank(question, merged)
-        return self._expand(merged, limit)
+        if aborted():
+            log.info("检索中止(用户停止) kbs=%s", "+".join(kbs))
+            return []
+        result = self._expand(merged, limit)
+        log.info(
+            "检索 kbs=%s 问题chars=%d 向量命中=%d 关键词命中=%d 融合=%d "
+            "最终=%d段 上下文chars=%d 耗时=%.1fs",
+            "+".join(kbs),
+            len(question),
+            len(vector_hits),
+            len(keyword_pairs),
+            len(merged),
+            len(result),
+            sum(len(hit.get("content") or "") for hit in result),
+            time.perf_counter() - started,
+        )
+        return result
 
     # ------------------------------------------------------------------
     # 1) 向量检索

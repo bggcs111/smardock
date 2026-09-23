@@ -1,5 +1,7 @@
 @echo off
-rem 文档智能问答与归档系统 —— Windows 启动脚本
+rem 文档智能问答工具 —— Windows 启动脚本
+rem 本文件为 UTF-8 编码，先切到 65001 代码页，避免中文提示乱码
+chcp 65001 >nul
 setlocal
 cd /d "%~dp0"
 
@@ -14,8 +16,8 @@ call ".venv\Scripts\activate.bat"
 rem 2) 安装依赖（只在首次执行；如需重装请删除 .venv\.deps-ok）
 if not exist ".venv\.deps-ok" (
   echo [2/3] 安装依赖，首次运行需要几分钟，请稍候...
-  python -m pip install --upgrade pip
-  python -m pip install -r requirements.txt
+  ".\.venv\Scripts\python.exe" -m pip install --upgrade pip
+  ".\.venv\Scripts\python.exe" -m pip install -r requirements.txt
   if errorlevel 1 (
     echo 依赖安装失败，请检查网络连接或 Python 版本。
     exit /b 1
@@ -33,5 +35,10 @@ if not exist ".env" (
 )
 
 echo [3/3] 启动服务
-python app.py
+".\.venv\Scripts\python.exe" app.py
+if errorlevel 1 (
+  echo.
+  echo 启动失败，请查看上面的错误信息。
+  pause
+)
 endlocal

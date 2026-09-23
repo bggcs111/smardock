@@ -18,7 +18,9 @@
           --warning              #F59E0B                 警告
           --danger               #EF4444                 危险操作
           --danger-soft          #FEF2F2                 危险操作悬停底
-分割线    --line                 #E5E7EB                 极浅，仅用于必要分隔
+分割线    --line                 #E5E7EB                 中线：表格、条目分隔
+          --line-strong          #D3D6DD                 外框：面板与折叠区容器（第四级）
+          --line-soft            #ECEDF1                 内框：容器内控件的描边（最轻）
 圆角      --radius               10px                    全局统一，不混用
 间距      --gap-1 … --gap-6      4 / 8 / 12 / 16 / 24 / 32 px
 动效      --dur                  160ms                   150–200ms 区间内
@@ -61,6 +63,10 @@ DANGER = "#EF4444"
 DANGER_SOFT = "#FEF2F2"
 
 LINE = "#E5E7EB"
+#: 分组容器（面板 / 折叠区）的外框：比内部控件深一档，一眼看出"这圈是容器"
+LINE_STRONG = "#D3D6DD"
+#: 容器内部控件（输入框、次要按钮）的描边：最轻，往后退一层
+LINE_SOFT = "#ECEDF1"
 RADIUS = "10px"
 
 DURATION = "160ms"
@@ -98,6 +104,8 @@ APP_CSS = f"""
   --danger: {DANGER};
   --danger-soft: {DANGER_SOFT};
   --line: {LINE};
+  --line-strong: {LINE_STRONG};
+  --line-soft: {LINE_SOFT};
   --radius: {RADIUS};
   --gap-1: 4px;  --gap-2: 8px;  --gap-3: 12px;
   --gap-4: 16px; --gap-5: 24px; --gap-6: 32px;
@@ -163,11 +171,13 @@ APP_CSS = f"""
 }}
 
 /* ==========================================================================
-   1. 面板：靠留白 + 极浅 1px 分割线分组，禁止重边框与阴影堆叠
+   1. 面板：靠留白 + 1px 描边分组，禁止重边框与阴影堆叠
+      侧边栏底色本身是 --bg-subtle（灰），所以容器一律白底 + 深一档的
+      --line-strong 外框，才撑得起"卡片"这一层。
    ========================================================================== */
 .kv-panel {{
   background: var(--bg-panel);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius);
   padding: var(--gap-4);
   margin-bottom: var(--gap-4);
@@ -365,15 +375,77 @@ APP_CSS = f"""
 .kv-chat .eta-bar {{ display: none !important; }}
 
 /* ==========================================================================
-   4. 折叠区：统一为「1px 分割线 + 留白」的轻量容器
+   4. 侧边栏折叠区：三级层次一眼分明
+      ① 容器：白底 + --line-strong 外框 ——「这一圈是一组」
+      ② 标题条：浅灰底，展开后与内容之间压一条分割线 ——「谁管着下面这块」
+      ③ 容器内控件：描边降到 --line-soft，往后退一层 —— 让容器边界最醒目
+
+      侧边栏自身底色就是灰（--bg-subtle），所以容器必须白底才浮得起来；
+      三者若都用同一个 #E5E7EB，边界与内部方框就糊成一片（原来的问题）。
    ========================================================================== */
+
+/* 4a. 侧边栏内所有控件的描边统一退到最轻一档，与容器外框拉开差距 */
+.kv-sidebar {{
+  --input-border-color: {LINE_SOFT};
+  --button-secondary-border-color: {LINE_SOFT};
+}}
+
+/* 4b. 容器：自己不设内边距，交给标题条与内容各自控制；圆角靠 overflow 裁切 */
 .kv-accordion, .kv-danger {{
-  border: 1px solid var(--line) !important;
+  border: 1px solid var(--line-strong) !important;
   border-radius: var(--radius) !important;
   background: {BG_PANEL} !important;
-  padding: var(--gap-2) var(--gap-3) !important;
+  padding: 0 !important;
   margin-bottom: var(--gap-4) !important;
+  overflow: hidden;
 }}
+
+/* 4c. 标题条：浅灰底 + 主色文字，是这一组里最靠上、最重的那行 */
+.kv-accordion .label-wrap, .kv-danger .label-wrap {{
+  padding: var(--gap-3) var(--gap-4) !important;
+  margin: 0 !important;
+  background: #F4F4F1 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  color: {TEXT_PRIMARY} !important;
+  letter-spacing: .01em;
+  transition: background var(--dur) var(--ease);
+}}
+.kv-accordion .label-wrap:hover, .kv-danger .label-wrap:hover {{
+  background: #EEEEEA !important;
+}}
+/* 展开：标题条与内容之间补一条分割线，下辖关系一目了然 */
+.kv-accordion .label-wrap.open, .kv-danger .label-wrap.open {{
+  margin-bottom: 0 !important;
+  border-bottom: 1px solid {LINE_STRONG} !important;
+}}
+.kv-accordion .label-wrap .icon, .kv-danger .label-wrap .icon {{
+  color: {TEXT_TERTIARY} !important;
+  font-size: 11px !important;
+}}
+/* 标题条满宽，focus 轮廓改为内描边，避免被容器的 overflow 裁掉 */
+.kv-accordion .label-wrap:focus-visible, .kv-danger .label-wrap:focus-visible {{
+  outline: 2px solid {ACCENT};
+  outline-offset: -3px;
+}}
+
+/* 4d. 内容区：白底 + 内边距，把"组内具体项"整体缩进一层 */
+.kv-accordion [data-testid="accordion-content"],
+.kv-danger [data-testid="accordion-content"] {{
+  padding: var(--gap-3) var(--gap-4) !important;
+}}
+
+/* 4e. 组内的信息块（索引状态等）：灰底 + 最轻描边，是"组里的一个字段" */
+.kv-accordion .kv-status, .kv-danger .kv-status {{
+  border: 1px solid var(--line-soft);
+}}
+
+/* 4f. 危险操作组：只在边框与标题条上带一丝红，不做大面积铺色 */
+.kv-danger {{ border-color: #EFD9D9 !important; }}
+.kv-danger .label-wrap {{ background: #FBF1F1 !important; }}
+.kv-danger .label-wrap:hover {{ background: #F8E7E7 !important; }}
 .kv-danger .kv-section h3, .kv-danger .kv-section p {{ color: {DANGER} !important; }}
 .kv-danger button.stop {{
   background: #FFFFFF !important;

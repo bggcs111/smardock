@@ -55,7 +55,8 @@ cd smardock
 #### 本地 NER 模型说明
 
 NER模型为damo/nlp_raner_named-entity-recognition_chinese-base-generic，全本地运行，可增强脱敏信息的准确性。CPU即可推理，无需GPU。
-默认不安装此模型，如果需要使用，请根据requirements.txt安装。未安装时，会自动降级为「正则 + 标签锚定」脱敏。
+默认不会安装此模型，如果需要使用NER模型，可手动取消requirements.txt中的相关注释进行安装。
+未安装NER模型时，会自动降级为「正则 + 标签锚定」脱敏策略。
 
 
 ### 一键启动

@@ -8,9 +8,11 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
+from modules.logutil import get_logger, next_seq
 
 
 class RerankError(RuntimeError):
@@ -51,34 +53,47 @@ class Reranker:
 
         import dashscope
 
-        response = dashscope.TextReRank.call(
-            model=self.model,
-            api_key=self.api_key,
-            query=query[:2000],
-            # 接口要求非空字符串，这里用占位符兜底
-            documents=[doc[:2000] if doc.strip() else "-" for doc in documents],
-            top_n=min(self.top_n, len(documents)),
-            return_documents=False,
-        )
-
-        status = getattr(response, "status_code", None)
-        if status != 200:
-            raise RerankError(
-                f"重排序返回错误 {status}: {getattr(response, 'message', '')}".strip()
+        seq = next_seq("Rerank")
+        started = time.perf_counter()
+        try:
+            response = dashscope.TextReRank.call(
+                model=self.model,
+                api_key=self.api_key,
+                query=query[:2000],
+                # 接口要求非空字符串，这里用占位符兜底
+                documents=[doc[:2000] if doc.strip() else "-" for doc in documents],
+                top_n=min(self.top_n, len(documents)),
+                return_documents=False,
             )
 
-        output = getattr(response, "output", None) or {}
-        results: List[Dict[str, Any]] = output.get("results") or []
-        if not results:
-            raise RerankError("重排序未返回结果")
+            status = getattr(response, "status_code", None)
+            if status != 200:
+                raise RerankError(
+                    f"重排序返回错误 {status}: {getattr(response, 'message', '')}".strip()
+                )
 
-        ranked: List[Tuple[int, float]] = []
-        for item in results:
-            try:
-                ranked.append((int(item["index"]), float(item.get("relevance_score") or 0.0)))
-            except (KeyError, TypeError, ValueError):
-                continue
+            output = getattr(response, "output", None) or {}
+            results: List[Dict[str, Any]] = output.get("results") or []
+            if not results:
+                raise RerankError("重排序未返回结果")
 
-        if not ranked:
-            raise RerankError("重排序结果无法解析")
+            ranked: List[Tuple[int, float]] = []
+            for item in results:
+                try:
+                    ranked.append((int(item["index"]), float(item.get("relevance_score") or 0.0)))
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+            if not ranked:
+                raise RerankError("重排序结果无法解析")
+        except Exception as exc:  # noqa: BLE001
+            get_logger().error(
+                "Rerank调用 #%d 失败 文档=%d段 耗时=%.1fs：%s",
+                seq, len(documents), time.perf_counter() - started, exc,
+            )
+            raise
+        get_logger().info(
+            "Rerank调用 #%d %s 文档=%d段 耗时=%.1fs",
+            seq, self.model, len(documents), time.perf_counter() - started,
+        )
         return ranked

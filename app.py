@@ -3,7 +3,7 @@
 第五层（交互层）的入口：负责组装界面并绑定事件处理器。
 业务编排在 modules/ui/event_handlers.py，配色与样式在 modules/ui/theme.py。
 
-布局：左侧可收起、可拖拽改宽的侧边栏（问答知识库固定可见 + 创建或上传折叠）
+布局：左侧可收起、可拖拽改宽的侧边栏（问答知识库固定可见 + 新建/上传/管理折叠）
       + 中间主内容区（对话流，输入框固定在底部）
       + 右侧可折叠、可拖拽改宽的引用来源面板。
 
@@ -44,6 +44,7 @@ from modules.ui.event_handlers import (  # noqa: E402
     SUMMARY_EMPTY,
     KnowledgeQAApp,
 )
+from modules.logutil import call_totals, get_logger, setup_logging  # noqa: E402
 from modules.ui.theme import APP_CSS, RESIZE_HEAD, SCROLL_JS, build_theme  # noqa: E402
 
 
@@ -94,8 +95,8 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                     value=[],
                 )
 
-            # 低频操作收进「创建或上传」，默认折叠
-            with gr.Accordion("创建或上传", open=False, elem_classes=["kv-accordion"]):
+            # 低频操作分三个独立折叠区，避免一个 Accordion 里塞太多功能
+            with gr.Accordion("新建知识库", open=False, elem_classes=["kv-accordion"]):
                 gr.Markdown("新建知识库", elem_classes=["kv-section"])
                 kb_name_box = gr.Textbox(
                     label="名称", placeholder="例如：劳动合同"
@@ -107,10 +108,11 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                 )
                 create_kb_btn = gr.Button("创建知识库", variant="secondary", size="sm")
 
+            with gr.Accordion("上传文档并建立索引", open=False, elem_classes=["kv-accordion"]):
                 gr.Markdown("上传文档并建立索引", elem_classes=["kv-section"])
                 upload_kb = gr.Dropdown(label="上传到知识库", choices=[], value=None)
                 gr.Markdown(
-                    "文档处理模式跟随所选知识库：隐私库入库前脱敏，普通库不做处理。",
+                    "文档处理模式和知识库模式一致。",
                     elem_classes=["kv-hint"],
                 )
                 file_input = gr.Files(
@@ -119,7 +121,12 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                     file_types=[".pdf", ".docx"],
                     type="filepath",
                 )
-                upload_btn = gr.Button("上传并建立索引", variant="primary")
+                with gr.Row():
+                    upload_btn = gr.Button("上传并建立索引", variant="primary", scale=3)
+                    # 建立索引期间显示，用于中断本次上传（见下方事件绑定）
+                    upload_stop_btn = gr.Button(
+                        "停止", variant="stop", size="sm", scale=1, visible=False
+                    )
 
                 gr.Markdown("索引状态", elem_classes=["kv-section"])
                 status_md = gr.Markdown(STATUS_EMPTY, elem_classes=["kv-status"])
@@ -135,12 +142,19 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
 
                 gr.Markdown("重建索引", elem_classes=["kv-section"])
                 gr.Markdown(
-                    "解析引擎或分块策略更新后，旧索引不会自动更新，需在此重建。"
-                    "重建会复用原件的处理模式（隐私文档重新脱敏），耗时取决于文档大小。",
+                    "只有在项目代码中的解析引擎或分块策略更新后，才需要重建索引。",
                     elem_classes=["kv-hint"],
                 )
                 rebuild_kb = gr.Dropdown(label="选择知识库", choices=[], value=None)
-                rebuild_btn = gr.Button("重建所选知识库的索引", variant="secondary", size="sm")
+                with gr.Row():
+                    # 重建索引按钮改小：文案缩短、scale 从 3 降到 2
+                    rebuild_btn = gr.Button(
+                        "重建索引", variant="secondary", size="sm", scale=2
+                    )
+                    # 重建期间显示，用于中断本次重建（见下方事件绑定）
+                    rebuild_stop_btn = gr.Button(
+                        "停止", variant="stop", size="sm", scale=1, visible=False
+                    )
                 doc_status_md = gr.Markdown(DOC_STATUS_EMPTY, elem_classes=["kv-status"])
 
             # 危险操作：默认折叠，且必须勾选确认框才会执行
@@ -149,14 +163,16 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                     "删除不可恢复，会同时清理已归档原件与向量索引。",
                     elem_classes=["kv-section"],
                 )
+                # 确认框对整个删除区生效（知识库与文档删除共用），
+                # 放在最前面，避免被误以为只对文档删除有效
+                confirm_checkbox = gr.Checkbox(
+                    label="确认要删除，此操作不可恢复", value=False
+                )
                 gr.Markdown("删除知识库", elem_classes=["kv-section"])
                 delete_kb_dropdown = gr.Dropdown(label="选择知识库", choices=[])
                 delete_kb_btn = gr.Button("删除所选知识库", variant="stop", size="sm")
                 gr.Markdown("删除单篇文档", elem_classes=["kv-section"])
                 delete_doc_dropdown = gr.Dropdown(label="选择文档", choices=[])
-                confirm_checkbox = gr.Checkbox(
-                    label="我已确认要执行删除，此操作不可恢复", value=False
-                )
                 delete_doc_btn = gr.Button("删除选中文档", variant="stop", size="sm")
 
             with gr.Accordion("配置自检 / 知识库概览", open=False, elem_classes=["kv-accordion"]):
@@ -171,7 +187,7 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
         with gr.Column(elem_classes=["kv-main"]):
             gr.Markdown(
                 "# smardock · 文档智能问答工具\n"
-                "本地解析归档 · 隐私模式下云端只见占位符 · "
+                "本地解析归档 · 隐私模式下云端只见占位符，保护隐私 · "
                 "[GitHub 仓库](https://github.com/bggcs111/smardock)",
                 elem_classes=["kv-title"],
             )
@@ -200,6 +216,8 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                         container=False,
                     )
                     send_btn = gr.Button("发送", variant="primary", scale=1)
+                    # 回答期间显示，用于中断当前回答（纯前端取消，见下方事件绑定）
+                    stop_btn = gr.Button("停止", variant="stop", scale=1, visible=False)
                 with gr.Row():
                     reuse_checkbox = gr.Checkbox(
                         label="相同问题复用历史答案",
@@ -235,7 +253,7 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                     choices=[],
                     value=None,
                     elem_classes=["kv-history-list"],
-                    info="按对话分类；点击任一会话即可切换并查看它的历史",
+                    info="点击任一会话即可切换并查看它的历史",
                 )
                 with gr.Row():
                     delete_session_btn = gr.Button(
@@ -274,8 +292,14 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
             "confirm_checkbox": confirm_checkbox,
             "rebuild_kb": rebuild_kb,
             "doc_status_md": doc_status_md,
+            "upload_btn": upload_btn,
+            "upload_stop_btn": upload_stop_btn,
+            "rebuild_btn": rebuild_btn,
+            "rebuild_stop_btn": rebuild_stop_btn,
             "chatbot": chatbot,
             "question_box": question_box,
+            "send_btn": send_btn,
+            "stop_btn": stop_btn,
             "session_state": session_state,
             "session_radio": session_radio,
             "session_md": session_md,
@@ -335,6 +359,9 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
                 ],
                 query_outputs,
             ),
+            ("finish_query", app.finish_query, [chatbot], query_outputs),
+            ("stop_query", app.stop_query, None, query_outputs),
+            ("stop_indexing", app.stop_indexing, None, canon_outputs),
             (
                 "handle_rebuild",
                 app.handle_rebuild,
@@ -375,20 +402,33 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
             inputs=[delete_kb_dropdown, kb_checkbox, confirm_checkbox, scope_dropdown],
             outputs=canon_outputs,
         )
-        upload_btn.click(
+        upload_event = upload_btn.click(
             fn=app.handle_upload,
             inputs=[file_input, upload_kb, kb_checkbox, scope_dropdown],
             outputs=canon_outputs,
+            trigger_mode="once",
         )
         delete_doc_btn.click(
             fn=app.handle_delete_document,
             inputs=[delete_doc_dropdown, confirm_checkbox, kb_checkbox, scope_dropdown],
             outputs=canon_outputs,
         )
-        rebuild_btn.click(
+        rebuild_event = rebuild_btn.click(
             fn=app.handle_rebuild,
             inputs=[rebuild_kb, kb_checkbox, scope_dropdown],
             outputs=canon_outputs,
+            trigger_mode="once",
+        )
+
+        # 索引任务的「停止」：cancels 让前端立刻掐断正在跑的事件（不再刷新进度），
+        # 同时后端置取消信号让循环在下一个检查点退出，并复位按钮/写一句收尾状态。
+        upload_stop_btn.click(
+            fn=app.stop_indexing, inputs=None, outputs=canon_outputs,
+            cancels=[upload_event],
+        )
+        rebuild_stop_btn.click(
+            fn=app.stop_indexing, inputs=None, outputs=canon_outputs,
+            cancels=[rebuild_event],
         )
 
         history_clear_btn.click(
@@ -421,20 +461,38 @@ def build_ui(app: KnowledgeQAApp) -> "gr.Blocks":
         ]
         # show_progress="hidden"：不渲染 Gradio 自带的进度条，
         # 生成进度由对话区的「正在检索…」与逐字输出体现。
-        send_btn.click(
+        # trigger_mode="once"：本次回答结束前，同一触发方式（按钮 / 回车）不再受理，
+        # 避免连点「发送」排出一串回答；回答期间输入区还会被锁定（见 handle_query）。
+        send_event = send_btn.click(
             fn=app.handle_query, inputs=query_inputs, outputs=query_outputs,
-            show_progress="hidden",
+            show_progress="hidden", trigger_mode="once",
         )
-        question_box.submit(
+        submit_event = question_box.submit(
             fn=app.handle_query, inputs=query_inputs, outputs=query_outputs,
-            show_progress="hidden",
+            show_progress="hidden", trigger_mode="once",
         )
+
+        # 「停止」：cancels 掐断当前回答；同时挂一个后端处理器，先把输入区解冻
+        # （前端取消要等 Gradio 关掉生成器，检索期间没有 yield，会锁住好几秒）。
+        stop_btn.click(
+            fn=app.stop_query, inputs=None, outputs=query_outputs,
+            cancels=[send_event, submit_event],
+        )
+
+        # 收尾：正常结束与被「停止」取消都会走到，负责把输入区解锁、
+        # 隐藏「停止」。被取消时收尾输出没机会发回前端，必须靠它兜底。
+        for query_event in (send_event, submit_event):
+            query_event.then(
+                fn=app.finish_query, inputs=[chatbot], outputs=query_outputs,
+                queue=False,
+            )
 
     return demo
 
 
 def _cleanup() -> None:
     """退出服务时清理临时缓存文件（导出副本 / Gradio 上传中转 / 字节码缓存）。"""
+    get_logger().info("服务退出 本次运行API调用统计=%s", call_totals())
     cleaned = config.cleanup_temp_files()
     if cleaned:
         print(f"[清理] 已删除临时缓存：{'、'.join(cleaned)}")
@@ -444,6 +502,11 @@ def _cleanup() -> None:
 
 def main() -> None:
     config.ensure_dirs()
+    log = setup_logging()
+    log.info(
+        "服务启动 问答模型=%s@%s 向量化=%s 数据目录=%s",
+        config.LLM_MODEL, config.LLM_BASE_URL, config.EMBEDDING_MODEL, config.DATA_DIR,
+    )
     app = KnowledgeQAApp()
     demo = build_ui(app)
 

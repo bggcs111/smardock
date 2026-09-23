@@ -19,9 +19,11 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import config
+from modules.logutil import get_logger, next_seq
 
 _CITE_RE = re.compile(r"\[(\d{1,2})\]")
 
@@ -183,6 +185,15 @@ class QAAgent:
         client = self._get_client()
         kwargs = self._base_kwargs(messages, stream=True)
 
+        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        seq = next_seq("LLM")
+        log = get_logger()
+        started = time.perf_counter()
+        log.info(
+            "LLM调用 #%d 流式开始 model=%s prompt_chars=%d",
+            seq, self.model, prompt_chars,
+        )
+
         last_error: Optional[Exception] = None
         stream = None
         for _ in range(3):
@@ -192,20 +203,76 @@ class QAAgent:
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if not self._adapt_kwargs(kwargs, exc):
+                    log.error("LLM调用 #%d 建立流式失败：%s", seq, exc)
                     raise LLMError(f"调用大模型失败：{exc}") from exc
         if stream is None:
+            log.error("LLM调用 #%d 建立流式失败：%s", seq, last_error)
             raise LLMError(f"调用大模型失败：{last_error}")
 
+        output_chars = 0
+        finish_reason = ""
         try:
             for chunk in stream:
                 choices = getattr(chunk, "choices", None) or []
                 if not choices:
                     continue
+                reason = getattr(choices[0], "finish_reason", None)
+                if reason:
+                    finish_reason = str(reason)
                 delta = getattr(choices[0].delta, "content", None)
                 if delta:
+                    output_chars += len(delta)
                     yield delta
+        except GeneratorExit:
+            # 用户点「停止」时这个生成器会在 yield 处被关掉（GeneratorExit），
+            # 主动关掉 HTTP 流，云端才能立刻察觉连接断开并停止继续生成。
+            # 注意：**已经吐出来的 token 仍会照常计费**，这里省下的是后面没生成的部分。
+            log.info(
+                "LLM调用 #%d 流式被停止 已输出chars=%d 耗时=%.1fs",
+                seq, output_chars, time.perf_counter() - started,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001
+            log.error(
+                "LLM调用 #%d 流式中断 已输出chars=%d 耗时=%.1fs 错误=%s",
+                seq, output_chars, time.perf_counter() - started, exc,
+            )
             raise LLMError(f"读取流式响应失败：{exc}") from exc
+        finally:
+            self._close_stream(stream)
+
+        elapsed = time.perf_counter() - started
+        if not finish_reason:
+            # 整个流没带任何 finish_reason 就结束了：连接多半被提前掐断，
+            # 回答很可能停在半句——排查「回答显示一半」类问题的直接证据。
+            log.warning(
+                "LLM调用 #%d 流式结束(未收到finish_reason，流可能被提前断开) "
+                "model=%s prompt_chars=%d 已输出chars=%d 耗时=%.1fs",
+                seq, self.model, prompt_chars, output_chars, elapsed,
+            )
+        elif finish_reason != "stop":
+            # length：命中 max_tokens；其余值：模型侧提前收尾
+            log.warning(
+                "LLM调用 #%d 流式结束(未正常完结) finish_reason=%s model=%s "
+                "prompt_chars=%d 已输出chars=%d 耗时=%.1fs",
+                seq, finish_reason, self.model, prompt_chars, output_chars, elapsed,
+            )
+        else:
+            log.info(
+                "LLM调用 #%d 流式完成 model=%s prompt_chars=%d output_chars=%d 耗时=%.1fs",
+                seq, self.model, prompt_chars, output_chars, elapsed,
+            )
+
+    @staticmethod
+    def _close_stream(stream: Any) -> None:
+        """尽力关闭流式响应（不同 SDK 的关闭方法名不一致，缺失就跳过）。"""
+        close = getattr(stream, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     def _base_kwargs(self, messages: List[Dict[str, str]], stream: bool) -> Dict[str, Any]:
@@ -244,15 +311,28 @@ class QAAgent:
         client = self._get_client()
         kwargs = self._base_kwargs(messages, stream=False)
 
+        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        seq = next_seq("LLM")
+        started = time.perf_counter()
+
         last_error: Optional[Exception] = None
         for _ in range(3):
             try:
-                return self._extract_content(client.chat.completions.create(**kwargs))
+                content = self._extract_content(client.chat.completions.create(**kwargs))
+                get_logger().info(
+                    "LLM调用 #%d 非流式 model=%s prompt_chars=%d output_chars=%d 耗时=%.1fs",
+                    seq, self.model, prompt_chars, len(content), time.perf_counter() - started,
+                )
+                return content
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if not self._adapt_kwargs(kwargs, exc):
                     break
 
+        get_logger().error(
+            "LLM调用 #%d 非流式失败 model=%s prompt_chars=%d 错误=%s",
+            seq, self.model, prompt_chars, last_error,
+        )
         raise LLMError(f"调用大模型失败：{last_error}")
 
     def _note(self, message: str) -> None:

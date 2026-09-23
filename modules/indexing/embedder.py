@@ -11,13 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import config
+from modules.logutil import get_logger, next_seq
 
 
 class EmbeddingError(RuntimeError):
     """向量化失败。"""
+
+
+class EmbeddingCancelled(RuntimeError):
+    """向量化被用户手动停止（协作式取消，见 :meth:`Embedder.embed_texts`）。"""
 
 
 class Embedder:
@@ -56,8 +61,18 @@ class Embedder:
     # ------------------------------------------------------------------
     # 对外接口
     # ------------------------------------------------------------------
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
-        """批量向量化，返回与输入等长的向量列表。"""
+    def embed_texts(
+        self,
+        texts: List[str],
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> List[List[float]]:
+        """批量向量化，返回与输入等长的向量列表。
+
+        :param cancel_check: 可选的无参回调，返回 True 表示用户已请求停止；
+            此时抛出 :class:`EmbeddingCancelled`。检查点放在每批请求**之前**，
+            所以响应延迟最多约为一次批量请求的耗时（默认每批 10 段）。
+            已发出的批次结果一并丢弃——调用方拿到异常就不会落库。
+        """
         if not texts:
             return []
         if not self.is_available():
@@ -79,6 +94,8 @@ class Embedder:
             pending_texts.append(text)
 
         for start in range(0, len(pending_texts), self.batch_size):
+            if cancel_check is not None and cancel_check():
+                raise EmbeddingCancelled("向量化已停止")
             batch_texts = pending_texts[start:start + self.batch_size]
             batch_indexes = pending_indexes[start:start + self.batch_size]
             vectors = self._embed_batch(batch_texts)
@@ -102,15 +119,31 @@ class Embedder:
     # ------------------------------------------------------------------
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
         last_error: Optional[Exception] = None
+        chars = sum(len(text) for text in texts)
+        seq = next_seq("Embedding")
+        started = time.perf_counter()
         for attempt in range(1, self.max_retry + 1):
             try:
                 if self.provider == "openai":
-                    return self._embed_openai(texts)
-                return self._embed_dashscope(texts)
+                    vectors = self._embed_openai(texts)
+                else:
+                    vectors = self._embed_dashscope(texts)
+                get_logger().info(
+                    "Embedding调用 #%d %s 批次=%d段 chars=%d 耗时=%.1fs",
+                    seq, self.describe(), len(texts), chars, time.perf_counter() - started,
+                )
+                return vectors
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 if attempt < self.max_retry:
+                    get_logger().warning(
+                        "Embedding调用 #%d 第%d次尝试失败：%s", seq, attempt, exc
+                    )
                     time.sleep(min(2 ** attempt, 8))
+        get_logger().error(
+            "Embedding调用 #%d 失败(已重试%d次) 批次=%d段 chars=%d 错误=%s",
+            seq, self.max_retry, len(texts), chars, last_error,
+        )
         raise EmbeddingError(f"向量化请求失败（已重试 {self.max_retry} 次）：{last_error}")
 
     def _embed_dashscope(self, texts: List[str]) -> List[List[float]]:

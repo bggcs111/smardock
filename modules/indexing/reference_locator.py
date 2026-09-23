@@ -17,6 +17,10 @@
 关于 ``link`` 的说明：浏览器出于安全限制，不允许从 http 页面跳转到 ``file:///``，
 因此 UI 层不会把该链接当作可点击跳转，而是同时展示「文件名 + 页码 + 本地绝对路径」，
 并可通过 :meth:`export` 把原件复制到导出目录供浏览器下载。
+
+出处可追溯的前提是原件还在本地：原件被移动/删除，或记录里留着失效的绝对路径时，
+:meth:`render_markdown` 会在原本显示路径的位置给出 :data:`MISSING_SOURCE_HINT`
+这句话作为提示（悬停标注也会补一句），而不是甩一个点不开的路径让人以为能跳转。
 """
 from __future__ import annotations
 
@@ -26,6 +30,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from modules.storage.document_store import DocumentStore
+
+#: 出处原件找不到时，在引用面板里替代本地路径显示的文字提示
+MISSING_SOURCE_HINT = "⚠️ 未找到原件，无法定位出处"
 
 # 强调与代码标记：片段里的这些符号会污染外层 Markdown 结构
 _EMPHASIS_RE = re.compile(r"\*{1,3}|_{2,}")
@@ -98,10 +105,22 @@ class ReferenceLocator:
     def source_label(
         cls, reference: Dict[str, Any], masked: Optional[Dict[str, str]] = None
     ) -> str:
-        """「文档1.pdf · 第 3 页」这类来源标注（引用上标的 hover 提示）。"""
+        """「文档1.pdf · 第 3 页」这类来源标注（引用上标的 hover 提示）。
+
+        原件已找不到时补一句提示：来源信息还认得出，但已经回不到原件。
+        """
         name = cls.display_name(reference, masked)
         page = reference.get("page")
-        return name + (f" · 第 {page} 页" if page else "")
+        label = name + (f" · 第 {page} 页" if page else "")
+        if not cls.file_available(reference):
+            label += "（原件未找到）"
+        return label
+
+    @staticmethod
+    def file_available(reference: Dict[str, Any]) -> bool:
+        """出处原件是否还在本地：路径有值，且确实指向一个存在的文件。"""
+        path = str(reference.get("local_path") or "")
+        return bool(path) and Path(path).is_file()
 
     # ------------------------------------------------------------------
     def export(
@@ -145,7 +164,7 @@ class ReferenceLocator:
                 # 再规范化一次：片段可能已被还原器填回真实信息，同样不能污染 Markdown 结构
                 lines.append(f"> {snippet}")
             local_path = reference.get("local_path") or ""
-            if local_path:
+            if self.file_available(reference):
                 names = masked or {}
                 if local_path in names:
                     # 路径里的文件名同样打码，保留目录层级以便定位
@@ -153,6 +172,10 @@ class ReferenceLocator:
                     if original and original in local_path:
                         local_path = local_path.replace(original, names[local_path])
                 lines.append(f"`{local_path}`")
+            else:
+                # 出处失效（原件被移动/删除，或记录里是过期的绝对路径）：
+                # 这里原本是本地路径，现在只给一句能看懂的话，不给点不开的路径。
+                lines.append(MISSING_SOURCE_HINT)
             lines.append("")
         return "\n".join(lines).strip()
 
