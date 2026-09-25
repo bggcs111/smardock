@@ -124,6 +124,10 @@ RETRIEVING_HINT = "_正在检索相关片段…_"
 STOPPED_HINT = "_（已停止生成）_"
 #: 停止后对话页底部那条状态栏的提示
 STOPPED_SUMMARY = "⏹ 已停止生成，本轮未存档"
+#: 首次使用隐私库时，本地脱敏模型尚未加载的对话区提示
+NER_LOADING_HINT = "_（首次使用隐私库，正在加载本地脱敏模型…）_"
+#: 已有问答在跑时，新提问的即时提示（提问不排队、不缓存，杜绝迟到回答）
+QUERY_BUSY_MESSAGE = "已有提问正在处理中，请等它结束或点「停止」后再提问。"
 
 #: 「问答历史」面板最多展示多少条
 HISTORY_LIMIT = 30
@@ -203,6 +207,8 @@ class KnowledgeQAApp:
         #: 问答的协作式取消信号：检索各阶段之间、流式生成每段增量之前读它。
         #: 有它才能在点「停止」后立刻收手，而不是等 Gradio 把生成器关掉。
         self._query_cancel = threading.Event()
+        #: 提问单飞锁：同一时刻只允许一轮问答在跑，新提问立即被拒、不入队等待
+        self._query_lock = threading.Lock()
 
     # ==================================================================
     # 索引任务的运行状态
@@ -495,6 +501,12 @@ class KnowledgeQAApp:
         )
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
+    def _kb_label(self, name: str) -> str:
+        """知识库显示名：名字后标注处理模式（隐私模式 / 普通模式）。"""
+        mode = self.metadata.kb_mode(name)
+        tag = "隐私模式" if mode == MODE_PRIVACY_VALUE else "普通模式"
+        return f"{name}（{tag}）"
+
     def _list_state(
         self,
         selected: Optional[List[str]] = None,
@@ -506,7 +518,8 @@ class KnowledgeQAApp:
         :param scope: 当前问答范围，若因知识库筛选变化而失效会自动回退
         """
         names = self.metadata.kb_names()
-        kb_choices = [(name, name) for name in names]
+        # 知识库选项展示为「名字（模式）」，value 仍是库名，下游逻辑不变
+        kb_choices = [(self._kb_label(name), name) for name in names]
         keep = [name for name in (selected or []) if name in names]
         default_kb = names[0] if names else None
         return {
@@ -758,7 +771,14 @@ class KnowledgeQAApp:
 
         上传与重建索引共用这段流程，保证两条路径产出的索引完全一致。
         """
+        log = get_logger()
+        started = time.perf_counter()
+
         blocks = self.parser.parse(path)
+        log.info(
+            "索引进度 doc=%s 解析完成 blocks=%d 耗时=%.1fs",
+            doc_id, len(blocks), time.perf_counter() - started,
+        )
         if not blocks:
             raise ValueError("未能从文档中解析出任何内容")
 
@@ -770,6 +790,10 @@ class KnowledgeQAApp:
             blocks, _mapping, redaction_count = self.redactor.redact_blocks(
                 blocks, kb_name=kb_name, doc_id=doc_id
             )
+            log.info(
+                "索引进度 doc=%s 脱敏完成 命中=%d 耗时=%.1fs",
+                doc_id, redaction_count, time.perf_counter() - started,
+            )
 
         # 图表 AI 描述必须排在脱敏之后：该请求会把图表上下文发往云端
         if config.FIGURE_AI_DESCRIBE:
@@ -778,12 +802,20 @@ class KnowledgeQAApp:
         chunks = self.parser.build_chunks(blocks, doc_id, filename, kb_name)
         if not chunks:
             raise ValueError("未解析到可索引的文本内容")
+        log.info(
+            "索引进度 doc=%s 分块完成 chunks=%d 耗时=%.1fs",
+            doc_id, len(chunks), time.perf_counter() - started,
+        )
 
         contents = [chunk["content"] for chunk in chunks]
         # 向量化是最耗时的一段，也是唯一方便插入取消检查点的地方：
         # 传进运行中的取消信号，用户点「停止」后最多再等一批请求。
         embeddings = self.embedder.embed_texts(
             contents, cancel_check=self._index_cancel.is_set
+        )
+        log.info(
+            "索引进度 doc=%s 向量化完成 chunks=%d 总耗时=%.1fs",
+            doc_id, len(chunks), time.perf_counter() - started,
         )
         return blocks, chunks, contents, embeddings, redaction_count
 
@@ -1070,6 +1102,36 @@ class KnowledgeQAApp:
         reuse: bool = True,
         session_id: str = "",
     ) -> Generator[Tuple[Any, ...], None, None]:
+        """提问入口：**同一时刻只允许一轮问答**（命令不排队、不缓存）。
+
+        已有问答在跑时，新提问立即返回提示，而不是在队列里等上一轮结束后
+        "迟到的"执行——避免出现延迟回答 / 重复回答。异常收敛见下方实现。
+        """
+        if not self._query_lock.acquire(blocking=False):
+            items = [dict(item) for item in (history or [])]
+            yield _pack_query(
+                {
+                    "chatbot": items + [{"role": "assistant", "content": QUERY_BUSY_MESSAGE}],
+                    "summary_md": QUERY_BUSY_MESSAGE,
+                }
+            )
+            return
+        try:
+            yield from self._handle_query_impl(
+                question, kb_names, history, scope, reuse, session_id
+            )
+        finally:
+            self._query_lock.release()
+
+    def _handle_query_impl(
+        self,
+        question: str,
+        kb_names: Optional[List[str]],
+        history: Optional[List[Dict[str, str]]],
+        scope: Optional[str] = None,
+        reuse: bool = True,
+        session_id: str = "",
+    ) -> Generator[Tuple[Any, ...], None, None]:
         """生成器：检索后流式输出回答（实现见 :meth:`_query_stream`）。
 
         这一层只做一件事：把未预期的异常收敛成对话区里的一条提示。
@@ -1228,6 +1290,21 @@ class KnowledgeQAApp:
         restore_enabled = privacy and not strict_mode
         current["privacy"] = privacy
 
+        # 1.15) 首次使用隐私库：本地脱敏模型可能还在懒加载（几十秒），
+        #       先把用户问题和提示显示出来，避免"点了发送没反应"的空窗
+        assistant_shown = False
+        if privacy and not self.redactor.ner_available:
+            history.append({"role": "assistant", "content": NER_LOADING_HINT})
+            display = [dict(item) for item in history]
+            if live is not None:
+                live["history"] = display
+            yield emit(
+                [dict(item) for item in display],
+                summary="首次使用隐私库：正在加载本地脱敏模型…",
+                running=True,
+            )
+            assistant_shown = True
+
         # 1.2) 隐私模式：提问本身也先脱敏，避免用户把真实身份信息带进云端请求
         query_text = question
         if privacy:
@@ -1235,6 +1312,11 @@ class KnowledgeQAApp:
             if question_result.get("has_sensitive"):
                 query_text = question_result["redacted_content"]
                 notes.append("提问中的敏感信息已在本地脱敏后才发往云端")
+
+        if assistant_shown and self._query_cancel.is_set():
+            history[-1]["content"] = STOPPED_HINT
+            yield emit(history, summary=STOPPED_SUMMARY)
+            return
 
         # 1.5) 命中存档记录：直接复用，省掉一次检索与模型调用
         fingerprint = self._fingerprint(
@@ -1264,7 +1346,9 @@ class KnowledgeQAApp:
         # 2) 检索：向量 + 关键词融合 → 可选精排 → 整节展开
         #    （单篇文档范围时按 doc_id 过滤）
         #    检索可能持续数秒，先在对话区给出可见反馈——进度只出现在对话区
-        history.append({"role": "assistant", "content": ""})
+        #    （首次隐私提问时已提前追加过 assistant 占位，这里复用同一条气泡）
+        if not assistant_shown:
+            history.append({"role": "assistant", "content": ""})
         display = [dict(item) for item in history]
         display[-1]["content"] = RETRIEVING_HINT
         if live is not None:
@@ -1446,6 +1530,7 @@ class KnowledgeQAApp:
             return _pack_query(
                 {
                     "chatbot": history if stopped else _update(),
+                    "references_md": REFS_EMPTY if stopped else _update(),
                     "question_box": _update(value="", interactive=True),
                     "send_btn": _update(visible=True),
                     "stop_btn": _update(visible=False),

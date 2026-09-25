@@ -184,6 +184,9 @@ PII_NER_MODEL_ID = _env(
     "damo/nlp_raner_named-entity-recognition_chinese-base-generic",
 )
 PII_REGEX_ENABLED = _env_bool("PII_REGEX_ENABLED", True)
+#: NER 推理线程数（限制索引期间的 CPU 占用）。数值即 torch 线程数；0 = 自动取逻辑核数的一半
+#: 经验值：8 逻辑处理器的机器设 5（名义占用约 62%，任务管理器读数约 70~80%）
+PII_NER_CPU_THREADS = _env_int("PII_NER_CPU_THREADS", 5)
 
 # ---------------------------------------------------------------------------
 # UI

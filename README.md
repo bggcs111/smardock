@@ -34,28 +34,30 @@
 
 ## 🚀 使用方法
 
-### 获取代码
-
-启动之前，请先获取代码。
-
-```bash
-git clone https://github.com/bggcs111/smardock.git
-cd smardock
-```
 
 ### 前置要求
+- Git（非必须，如果没有Git，可以在本网站手动下载项目代码）
 - Python 3.10+
 - 一个**向量化模型** API Key（默认阿里云百炼 DashScope `text-embedding-v3`）
 - 一个**问答模型** API Key（如deepseek-flash）
+
+### 获取代码
+
+启动之前，请先获取代码。如果没有Git，可以在本网站手动下载项目代码。
+
+```bash
+git clone https://github.com/bggcs111/smardock.git
+```
+
 ### 模型与运行环境
 
-本项目「本地模型」与「云端 API」分工明确：**敏感信息识别在本地跑，检索与生成走云端**。
+本项目「本地模型」与「云端 API」分工：**敏感信息识别在本地跑，检索与生成走云端**。
 
 
 #### 本地 NER 模型说明
 
 NER模型为damo/nlp_raner_named-entity-recognition_chinese-base-generic，全本地运行，可增强脱敏信息的准确性。CPU即可推理，无需GPU。
-默认不会安装此模型，如果需要使用NER模型，可手动取消requirements.txt中的相关注释进行安装。
+默认不会安装此模型，如果需要使用NER模型，可取消requirements.txt中相关注释，再删除.venv\.deps-ok，重新运行start.bat重新安装和启动。
 未安装NER模型时，会自动降级为「正则 + 标签锚定」脱敏策略。
 
 
@@ -63,7 +65,7 @@ NER模型为damo/nlp_raner_named-entity-recognition_chinese-base-generic，全�
 
 **Windows**
 
-运行项目根目录下的start.bat。
+运行项目根目录下的start.bat，自动创建虚拟环境、安装依赖并启动UI。首次使用前需要先在.env中填写API KEY。关于.env的配置方式见下面的**配置说明**。
 
 ```bat
 start.bat
@@ -71,22 +73,23 @@ start.bat
 
 **macOS / Linux**
 
-运行项目根目录下的start.sh。
+运行项目根目录下的start.sh，自动安装依赖并启动UI。首次使用前需要先在.env中填写API KEY。
+
 
 ```bash
 bash start.sh
 ```
 
-脚本会自动创建虚拟环境、安装依赖、从 `.env.example` 生成 `.env`。
 
 ### 手动启动
 
 ```bash
+cd smardock
 python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows用: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env             # 填入你的 API Key
+cp .env.example .env             # 需要手动在.env中填入你准备好的 API Key
 python app.py
 ```
 
@@ -98,7 +101,7 @@ python app.py
 3. **提问**：在对话框中提问，答案里的上标 `¹` 就是原文出处，点击可查看引用片段与下载原件
 
 ### 配置说明
-所有参数集中在 `config.py`，通过项目根目录的 `.env` 覆盖。常用项：
+所有参数集中在 `config.py`，通过项目根目录的 `.env` 覆盖。.env中常用参数：
 
 | 变量 | 说明 | 默认 |
 |---|---|---|

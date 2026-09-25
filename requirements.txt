@@ -20,13 +20,13 @@ python-dotenv>=1.0.0
 
 # ===== 本地 NER（隐私模式的 PII 识别）=====
 # 人名/地名/机构名识别；未安装时 PIIRedactor 自动降级为「仅正则脱敏」。
-# 取消下面的注释，重新运行依赖安装指令即可启用本地NER。
-# modelscope>=1.20.0
-# torch>=2.0.0
-# transformers>=4.50.0,<5     # 5.x 移除了 transformers.onnx，modelscope CRF 模型不兼容
-# huggingface-hub>=0.34.0,<1.0
-# datasets>=2.19.0
-# addict
-# simplejson
-# ruamel.yaml
-# sortedcontainers
+# 取消下面的注释，然后删除.venv\.deps-ok，重新运行start.bat，即可启用本地NER。
+modelscope>=1.20.0
+torch>=2.0.0
+transformers>=4.50.0,<5     # 5.x 移除了 transformers.onnx，modelscope CRF 模型不兼容
+huggingface-hub>=0.34.0,<1.0
+datasets>=2.19.0
+addict
+simplejson
+ruamel.yaml
+sortedcontainers

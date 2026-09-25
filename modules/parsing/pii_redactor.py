@@ -25,10 +25,13 @@
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
+from modules.logutil import get_logger
 
 # ---------------------------------------------------------------------------
 # 实体类型映射：模型输出标签 -> 中文占位符前缀
@@ -241,6 +244,8 @@ class PIIRedactor:
         self._ner_loaded = False
         self._ner_failed = False
         self.load_error: Optional[str] = None
+        #: 加载锁：并发调用（预热 / 上传 / 提问）只构建一次管道
+        self._ner_lock = threading.Lock()
 
     # ==================================================================
     # NER 模型（懒加载）
@@ -250,43 +255,70 @@ class PIIRedactor:
         """NER 是否已成功加载（调用前请先 :meth:`load_ner`）。"""
         return self._pipeline is not None
 
+    def _limit_cpu_threads(self) -> None:
+        """按指定线程数限制 NER 推理的 CPU 占用（PII_NER_CPU_THREADS）。
+
+        数值即 torch 线程数，超过逻辑核数时按核数封顶；
+        设为 0 时自动取逻辑核数的一半（保守档，至少 1）。
+        线程数就是占用上限的来源——避免索引期间跑满所有核、影响同时用电脑。
+        """
+        try:
+            import torch
+
+            total = os.cpu_count() or 4
+            configured = int(config.PII_NER_CPU_THREADS)
+            threads = configured if configured > 0 else max(1, total // 2)
+            threads = max(1, min(threads, total))
+            torch.set_num_threads(threads)
+            get_logger().info(
+                "NER CPU 限制 torch 线程=%d / 逻辑核数=%d", threads, total
+            )
+        except Exception as exc:  # noqa: BLE001
+            get_logger().warning("NER CPU 线程限制未生效：%s", exc)
+
     def load_ner(self) -> bool:
-        """加载本地 NER 管道；失败时返回 False 并记录原因（不抛异常）。"""
+        """加载本地 NER 管道；失败时返回 False 并记录原因（不抛异常）。
+
+        线程安全：加锁后只构建一次。启动预热 / 上传 / 提问脱敏并发调用时，
+        后来的调用会等第一次加载完成，不会重复构建，也不会拿到"加载中"的空结果。
+        """
         if not self.enable_ner:
             self.load_error = "已通过 PII_NER_ENABLED=false 关闭 NER 识别"
             return False
-        if self._ner_loaded:
-            return self._pipeline is not None
-        self._ner_loaded = True
-
-        try:
-            import modelscope  # noqa: F401
-        except Exception as exc:  # pragma: no cover - 依赖缺失
-            self._ner_failed = True
-            self.load_error = (
-                f"未安装 modelscope（{exc}）。已降级为仅正则脱敏；"
-                "如需识别人名/地名/机构名，请执行：pip install modelscope torch"
-            )
-            return False
-
-        try:
-            from modelscope.pipelines import pipeline
+        with self._ner_lock:
+            if self._ner_loaded:
+                return self._pipeline is not None
+            self._ner_loaded = True
 
             try:
-                self._pipeline = pipeline(
-                    task="named-entity-recognition", model=self.model_id
+                import modelscope  # noqa: F401
+            except Exception as exc:  # pragma: no cover - 依赖缺失
+                self._ner_failed = True
+                self.load_error = (
+                    f"未安装 modelscope（{exc}）。已降级为仅正则脱敏；"
+                    "如需识别人名/地名/机构名，请执行：pip install modelscope torch"
                 )
-            except TypeError:
-                from modelscope.utils.constant import Tasks
+                return False
 
-                self._pipeline = pipeline(Tasks.named_entity_recognition, self.model_id)
-        except Exception as exc:  # pragma: no cover - 模型加载失败
-            self._ner_failed = True
-            self.load_error = f"本地 NER 模型加载失败（{exc}）。已降级为仅正则脱敏。"
-            return False
+            try:
+                self._limit_cpu_threads()
+                from modelscope.pipelines import pipeline
 
-        self.load_error = None
-        return True
+                try:
+                    self._pipeline = pipeline(
+                        task="named-entity-recognition", model=self.model_id
+                    )
+                except TypeError:
+                    from modelscope.utils.constant import Tasks
+
+                    self._pipeline = pipeline(Tasks.named_entity_recognition, self.model_id)
+            except Exception as exc:  # pragma: no cover - 模型加载失败
+                self._ner_failed = True
+                self.load_error = f"本地 NER 模型加载失败（{exc}）。已降级为仅正则脱敏。"
+                return False
+
+            self.load_error = None
+            return True
 
     def _ner_detect(self, text: str) -> List[Dict[str, Any]]:
         """调用 NER 模型，长文本按句切段后偏移合并。"""
@@ -554,8 +586,10 @@ class PIIRedactor:
         pending: Dict[Tuple[str, str], str] = {}
         accumulated: Dict[str, str] = {}
         hit_count = 0
+        total_blocks = len(blocks)
+        log = get_logger()
 
-        for block in blocks:
+        for block_index, block in enumerate(blocks, start=1):
             for field in ("content", "context"):
                 value = block.get(field)
                 if not value:
@@ -565,6 +599,14 @@ class PIIRedactor:
                     block[field] = result["redacted_content"]
                     accumulated.update(result["redaction_map"])
                     hit_count += len(result["redaction_map"])
+            # 只记进度与统计量，不记录文档内容
+            if doc_id and total_blocks >= 40 and (
+                block_index % 20 == 0 or block_index == total_blocks
+            ):
+                log.info(
+                    "脱敏进度 doc=%s %d/%d块 已命中=%d",
+                    doc_id, block_index, total_blocks, hit_count,
+                )
 
         return blocks, accumulated, hit_count
 

@@ -18,6 +18,7 @@ import atexit
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -508,6 +509,15 @@ def main() -> None:
         config.LLM_MODEL, config.LLM_BASE_URL, config.EMBEDDING_MODEL, config.DATA_DIR,
     )
     app = KnowledgeQAApp()
+
+    # NER 预热：后台提前加载本地脱敏模型，避免首次隐私问答卡在加载上
+    if config.PII_NER_ENABLED:
+        def _warm_ner() -> None:
+            ok = app.redactor.load_ner()
+            log.info("NER 预热完成 可用=%s", ok)
+
+        threading.Thread(target=_warm_ner, name="ner-warmup", daemon=True).start()
+
     demo = build_ui(app)
 
     # 正常退出（含 Ctrl+C）都会走 atexit，这里再兜一层 finally
