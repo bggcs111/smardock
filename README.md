@@ -65,7 +65,7 @@ NER模型为damo/nlp_raner_named-entity-recognition_chinese-base-generic，全�
 
 **Windows**
 
-运行项目根目录下的start.bat，自动创建虚拟环境、安装依赖并启动UI。首次使用前需要先在.env中填写API KEY。关于.env的配置方式见下面的**配置说明**。
+运行项目根目录下的start.bat，自动创建虚拟环境、安装依赖并启动UI。首次使用前需要先把.env.example另存为.env，然后在.env中填写API KEY。关于.env的配置方式见下面的**配置说明**。
 
 ```bat
 start.bat
@@ -101,7 +101,7 @@ python app.py
 3. **提问**：在对话框中提问，答案里的上标 `¹` 就是原文出处，点击可查看引用片段与下载原件
 
 ### 配置说明
-所有参数集中在 `config.py`，通过项目根目录的 `.env` 覆盖。.env中常用参数：
+所有参数集中在 `config.py`，通过项目根目录的 `.env` 进行配置。.env中常用参数：
 
 | 变量 | 说明 | 默认 |
 |---|---|---|
